@@ -85,30 +85,87 @@ if not check_password():
 # Helper Functions: AI Detection & Matching
 # ----------------------------------------------------
 def analyze_text_ai_score(text: str) -> float:
-    """Calculates AI likelihood based on burstiness, vocabulary ratio, and buzzwords."""
-    words = re.findall(r'\b\w+\b', text.lower())
-    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 0]
-    
-    if len(words) < 5 or len(sentences) == 0:
+    """Enhanced AI Content Detection calibrated for modern LLM text patterns."""
+    if not text or len(text.strip()) < 15:
         return 0.0
 
-    # Metric 1: Burstiness (Variance in sentence length)
+    words = re.findall(r'\b[a-zA-Z]+\b', text.lower())
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 3]
+
+    word_count = len(words)
+    sentence_count = len(sentences)
+
+    if word_count < 8 or sentence_count == 0:
+        return 0.0
+
+    # 1. Expanded AI Phrase & Pattern Dictionary (Weight: 40%)
+    ai_phrases = [
+        "in today's", "fast-paced", "delve into", "testament to", "tapestry of",
+        "fostering a", "crucial role", "paramount to", "pivotal role", "furthermore",
+        "transformative impact", "key takeaways", "important to note", "in summary",
+        "moreover", "seamlessly", "ever-evolving", "rich tapestry", "beacon of",
+        "vital component", "underscores the", "by leveraging", "it is worth noting",
+        "plays a vital", "holistic approach", "game-changer", "in conclusion",
+        "embark on", "delving", "demystify", "unravel", "navigate the", "harnessing",
+        "in order to", "serves as a", "it is essential", "shed light on"
+    ]
+    
+    text_lower = text.lower()
+    phrase_hits = sum(1 for phrase in ai_phrases if phrase in text_lower)
+    phrase_score = min(100.0, phrase_hits * 30.0)
+
+    # 2. Pacing & Coefficient of Variation (Weight: 30%)
     sentence_lengths = [len(re.findall(r'\b\w+\b', s)) for s in sentences]
-    avg_len = sum(sentence_lengths) / len(sentence_lengths)
-    std_dev = math.sqrt(sum((l - avg_len) ** 2 for l in sentence_lengths) / len(sentence_lengths)) if len(sentence_lengths) > 1 else 0.0
-    burstiness_score = max(0.0, 100.0 - (std_dev * 18.0))
+    avg_sentence_len = sum(sentence_lengths) / sentence_count
+    
+    # AI targets structured sentence length (12 to 24 words per sentence)
+    if 12 <= avg_sentence_len <= 24:
+        avg_len_score = 85.0
+    elif 9 <= avg_sentence_len <= 28:
+        avg_len_score = 60.0
+    else:
+        avg_len_score = 25.0
 
-    # Metric 2: Vocabulary Uniformity
-    ttr = len(set(words)) / len(words)
-    vocab_score = max(0.0, (0.85 - ttr) * 200.0) if ttr < 0.85 else 0.0
+    # Standard deviation ratio relative to sentence length
+    std_dev = math.sqrt(sum((l - avg_sentence_len) ** 2 for l in sentence_lengths) / sentence_count) if sentence_count > 1 else 0.0
+    cv = (std_dev / avg_sentence_len) if avg_sentence_len > 0 else 1.0
 
-    # Metric 3: Common AI Buzzwords
-    buzzwords = ["delve", "testament", "tapestry", "fostering", "crucial", "paramount", "synergy", "pivotal", "furthermore", "transformative"]
-    buzzword_count = sum(1 for word in buzzwords if word in text.lower())
-    buzzword_score = min(100.0, buzzword_count * 25.0)
+    # Predictable AI pacing typically sits in the 0.20 to 0.55 range
+    if 0.20 <= cv <= 0.55:
+        cv_score = 90.0
+    elif 0.10 <= cv < 0.20 or 0.55 < cv <= 0.75:
+        cv_score = 60.0
+    else:
+        cv_score = 20.0
 
-    final_score = (burstiness_score * 0.45) + (vocab_score * 0.25) + (buzzword_score * 0.30)
-    return round(min(100.0, max(0.0, final_score)), 1)
+    pacing_score = (avg_len_score * 0.5) + (cv_score * 0.5)
+
+    # 3. Vocabulary Formality & Length (Weight: 20%)
+    avg_char_length = sum(len(w) for w in words) / word_count
+    if 5.1 <= avg_char_length <= 6.8:
+        formality_score = 85.0
+    elif 4.7 <= avg_char_length < 5.1 or 6.8 < avg_char_length <= 7.5:
+        formality_score = 55.0
+    else:
+        formality_score = 25.0
+
+    # 4. Structural Connectors & Bullet Formatting (Weight: 10%)
+    connectors = ["additionally,", "consequently,", "however,", "overall,", "specifically,", "ultimately,", "thus,", "therefore,"]
+    connector_hits = sum(1 for c in connectors if c in text_lower)
+    colon_hits = len(re.findall(r':\s', text))
+    
+    structural_score = min(100.0, (connector_hits * 25.0) + (colon_hits * 15.0))
+
+    # Calculate Weighted Final Score
+    raw_score = (phrase_score * 0.40) + (pacing_score * 0.30) + (formality_score * 0.20) + (structural_score * 0.10)
+
+    # Floor Score Calibration for direct AI phrase hits
+    if phrase_hits >= 2:
+        raw_score = max(raw_score, 78.0)
+    elif phrase_hits == 1:
+        raw_score = max(raw_score, 52.0)
+
+    return round(min(100.0, max(0.0, raw_score)), 1)
 
 
 def check_duplicate_in_db(slide_text: str, threshold=0.75):
