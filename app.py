@@ -7,11 +7,8 @@ import math
 from difflib import SequenceMatcher
 
 # ----------------------------------------------------
-# Database Connection (Supabase PostgreSQL)
+# Database Connection (Supabase PostgreSQL via Method 2)
 # ----------------------------------------------------
-# Updated with your credentials and database password
-DB_URI = st.secrets["DATABASE_URL"]
-
 def get_db_connection():
     """Establishes connection to Supabase using separate secret keys."""
     pg = st.secrets["postgres"]
