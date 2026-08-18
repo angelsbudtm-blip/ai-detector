@@ -10,7 +10,7 @@ from difflib import SequenceMatcher
 # Database Connection (Supabase PostgreSQL)
 # ----------------------------------------------------
 # Updated with your credentials and database password
-DB_URI = "postgresql://postgres.pebunriymyzssujivsys:ABEdu@5603@aws-0-ap-northeast-1.pooler.supabase.com:6543/postgres?pgbouncer=true"
+DB_URI = st.secrets["DATABASE_URL"]
 
 def get_db_connection():
     """Establishes connection to Supabase PostgreSQL."""
