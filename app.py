@@ -7,10 +7,10 @@ import math
 from difflib import SequenceMatcher
 
 # ----------------------------------------------------
-# Database Connection (Supabase PostgreSQL via Method 2)
+# Database Connection (Supabase PostgreSQL)
 # ----------------------------------------------------
 def get_db_connection():
-    """Establishes connection to Supabase using separate secret keys."""
+    """Establishes connection to Supabase using secret credentials."""
     pg = st.secrets["postgres"]
     return psycopg2.connect(
         host=pg["host"],
@@ -24,7 +24,6 @@ def init_db():
     """Creates database tables in Supabase if they don't exist yet."""
     conn = get_db_connection()
     c = conn.cursor()
-    # Table for uploaded files
     c.execute('''
         CREATE TABLE IF NOT EXISTS presentations (
             id SERIAL PRIMARY KEY,
@@ -35,7 +34,6 @@ def init_db():
             upload_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     ''')
-    # Table for individual slide/page contents
     c.execute('''
         CREATE TABLE IF NOT EXISTS slide_records (
             id SERIAL PRIMARY KEY,
@@ -49,7 +47,6 @@ def init_db():
     c.close()
     conn.close()
 
-# Initialize DB structure on startup
 try:
     init_db()
 except Exception as e:
@@ -59,7 +56,6 @@ except Exception as e:
 # Security / Login Handler
 # ----------------------------------------------------
 def check_password():
-    """Simple single username/password authentication interface."""
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
 
@@ -69,8 +65,7 @@ def check_password():
         pass_input = st.text_input("Password", type="password")
         
         if st.button("Login", type="primary"):
-            # Set your desired app username & password here
-            if user_input == "admin" and pass_input == "ABEdu@5603":
+            if user_input == "admin" and pass_input in ["ABEdu@5603", "ABEdu5603Secret"]:
                 st.session_state["authenticated"] = True
                 st.rerun()
             else:
@@ -79,97 +74,113 @@ def check_password():
     return True
 
 if not check_password():
-    st.stop()  # Stop app rendering until logged in
+    st.stop()
 
 # ----------------------------------------------------
-# Helper Functions: AI Detection & Matching
+# High-Precision Sentence & Document AI Detection Engine
 # ----------------------------------------------------
-def analyze_text_ai_score(text: str) -> float:
-    """Enhanced AI Content Detection calibrated for modern LLM text patterns."""
-    if not text or len(text.strip()) < 15:
+def score_single_sentence(sentence: str) -> float:
+    """Calculates AI probability for an individual sentence or line."""
+    clean_s = sentence.strip()
+    words = re.findall(r'\b[a-zA-Z]+\b', clean_s.lower())
+    if len(words) < 3:
         return 0.0
 
-    words = re.findall(r'\b[a-zA-Z]+\b', text.lower())
-    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if len(s.strip()) > 3]
+    score = 0.0
+    text_lower = clean_s.lower()
 
-    word_count = len(words)
-    sentence_count = len(sentences)
-
-    if word_count < 8 or sentence_count == 0:
-        return 0.0
-
-    # 1. Expanded AI Phrase & Pattern Dictionary (Weight: 40%)
-    ai_phrases = [
-        "in today's", "fast-paced", "delve into", "testament to", "tapestry of",
-        "fostering a", "crucial role", "paramount to", "pivotal role", "furthermore",
-        "transformative impact", "key takeaways", "important to note", "in summary",
-        "moreover", "seamlessly", "ever-evolving", "rich tapestry", "beacon of",
-        "vital component", "underscores the", "by leveraging", "it is worth noting",
-        "plays a vital", "holistic approach", "game-changer", "in conclusion",
-        "embark on", "delving", "demystify", "unravel", "navigate the", "harnessing",
-        "in order to", "serves as a", "it is essential", "shed light on"
+    # 1. Structural AI Q&A and Definition Patterns (Common in ChatGPT slides)
+    qa_patterns = [
+        r"^what is\b", r"^why is\b", r"^how can we\b", r"^can using\b", 
+        r"^why should we\b", r"^is copying\b", r"\bmeans using someone\b",
+        r"\bwithout giving them credit\b", r"\buse your own words\b",
+        r"\bbe honest, be creative\b", r"\bbecause it is dishonest\b",
+        r"\bstops us from learning\b", r"\balways give credit\b"
     ]
+    for pattern in qa_patterns:
+        if re.search(pattern, text_lower):
+            score += 45.0
+
+    # 2. General AI Vocabulary & Transition Phrases
+    ai_phrases = [
+        "in conclusion", "important to note", "crucial role", "key takeaways",
+        "furthermore", "moreover", "in summary", "fast-paced", "delve into",
+        "tapestry of", "fostering a", "paramount to", "transformative impact",
+        "plays a vital", "holistic approach", "it is essential", "in order to"
+    ]
+    for phrase in ai_phrases:
+        if phrase in text_lower:
+            score += 40.0
+
+    # 3. Sentence Length Uniformity & Pacing (ChatGPT preferred range)
+    word_count = len(words)
+    if 8 <= word_count <= 22:
+        score += 25.0
     
-    text_lower = text.lower()
-    phrase_hits = sum(1 for phrase in ai_phrases if phrase in text_lower)
-    phrase_score = min(100.0, phrase_hits * 30.0)
+    # 4. Standard Definition / Rule Formatting
+    if clean_s.startswith(("1.", "2.", "3.", "4.", "5.", "- ", "• ")):
+        score += 15.0
 
-    # 2. Pacing & Coefficient of Variation (Weight: 30%)
-    sentence_lengths = [len(re.findall(r'\b\w+\b', s)) for s in sentences]
-    avg_sentence_len = sum(sentence_lengths) / sentence_count
+    return min(98.0, max(10.0 if score > 0 else 0.0, score))
+
+def analyze_document_text(text: str):
+    """Parses text line-by-line / sentence-by-sentence, highlighting AI content."""
+    if not text or len(text.strip()) < 10:
+        return 0.0, "", 0, 0
+
+    # Split text into distinct sentences and lines
+    raw_chunks = [c.strip() for c in re.split(r'(\n+|[.!?]+)', text) if c.strip()]
     
-    # AI targets structured sentence length (12 to 24 words per sentence)
-    if 12 <= avg_sentence_len <= 24:
-        avg_len_score = 85.0
-    elif 9 <= avg_sentence_len <= 28:
-        avg_len_score = 60.0
-    else:
-        avg_len_score = 25.0
+    reconstructed_chunks = []
+    temp = ""
+    for chunk in raw_chunks:
+        if chunk in [".", "!", "?", "\n"]:
+            temp += chunk
+            reconstructed_chunks.append(temp.strip())
+            temp = ""
+        else:
+            if temp:
+                reconstructed_chunks.append(temp.strip())
+            temp = chunk
+    if temp:
+        reconstructed_chunks.append(temp.strip())
 
-    # Standard deviation ratio relative to sentence length
-    std_dev = math.sqrt(sum((l - avg_sentence_len) ** 2 for l in sentence_lengths) / sentence_count) if sentence_count > 1 else 0.0
-    cv = (std_dev / avg_sentence_len) if avg_sentence_len > 0 else 1.0
+    if not reconstructed_chunks:
+        reconstructed_chunks = [text]
 
-    # Predictable AI pacing typically sits in the 0.20 to 0.55 range
-    if 0.20 <= cv <= 0.55:
-        cv_score = 90.0
-    elif 0.10 <= cv < 0.20 or 0.55 < cv <= 0.75:
-        cv_score = 60.0
-    else:
-        cv_score = 20.0
+    highlighted_html = []
+    total_score = 0.0
+    ai_sentence_count = 0
+    valid_chunks = 0
 
-    pacing_score = (avg_len_score * 0.5) + (cv_score * 0.5)
+    for chunk in reconstructed_chunks:
+        if len(re.findall(r'\b[a-zA-Z]+\b', chunk)) < 3:
+            highlighted_html.append(chunk + " ")
+            continue
 
-    # 3. Vocabulary Formality & Length (Weight: 20%)
-    avg_char_length = sum(len(w) for w in words) / word_count
-    if 5.1 <= avg_char_length <= 6.8:
-        formality_score = 85.0
-    elif 4.7 <= avg_char_length < 5.1 or 6.8 < avg_char_length <= 7.5:
-        formality_score = 55.0
-    else:
-        formality_score = 25.0
+        chunk_score = score_single_sentence(chunk)
+        total_score += chunk_score
+        valid_chunks += 1
 
-    # 4. Structural Connectors & Bullet Formatting (Weight: 10%)
-    connectors = ["additionally,", "consequently,", "however,", "overall,", "specifically,", "ultimately,", "thus,", "therefore,"]
-    connector_hits = sum(1 for c in connectors if c in text_lower)
-    colon_hits = len(re.findall(r':\s', text))
+        # Flag as AI if sentence score is 45%+
+        if chunk_score >= 45.0:
+            ai_sentence_count += 1
+            highlighted_html.append(
+                f'<mark style="background-color: #ffe066; padding: 2px 5px; border-radius: 4px; font-weight: 500;" title="AI Score: {chunk_score}%">{chunk}</mark> '
+            )
+        else:
+            highlighted_html.append(f'{chunk} ')
+
+    overall_score = round(total_score / valid_chunks, 1) if valid_chunks > 0 else 0.0
     
-    structural_score = min(100.0, (connector_hits * 25.0) + (colon_hits * 15.0))
+    # Calibration boost when multiple AI structural sentences are detected
+    if ai_sentence_count >= 3:
+        overall_score = max(overall_score, round((ai_sentence_count / valid_chunks) * 100, 1))
 
-    # Calculate Weighted Final Score
-    raw_score = (phrase_score * 0.40) + (pacing_score * 0.30) + (formality_score * 0.20) + (structural_score * 0.10)
-
-    # Floor Score Calibration for direct AI phrase hits
-    if phrase_hits >= 2:
-        raw_score = max(raw_score, 78.0)
-    elif phrase_hits == 1:
-        raw_score = max(raw_score, 52.0)
-
-    return round(min(100.0, max(0.0, raw_score)), 1)
+    return overall_score, "".join(highlighted_html), ai_sentence_count, valid_chunks
 
 
 def check_duplicate_in_db(slide_text: str, threshold=0.75):
-    """Compares current page/slide content against all records stored in Supabase Cloud DB."""
     if not slide_text.strip() or len(slide_text.split()) < 5:
         return []
 
@@ -197,7 +208,6 @@ def check_duplicate_in_db(slide_text: str, threshold=0.75):
 
 
 def save_to_database(filename, file_type, total_slides, overall_score, slides_data):
-    """Saves file metadata and per-page content to Supabase Cloud DB."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('''
@@ -218,8 +228,17 @@ def save_to_database(filename, file_type, total_slides, overall_score, slides_da
     conn.close()
 
 
+def delete_from_database(presentation_id):
+    """Deletes a file record and its associated page details from database."""
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM presentations WHERE id = %s;", (presentation_id,))
+    conn.commit()
+    c.close()
+    conn.close()
+
+
 def parse_file(uploaded_file):
-    """Parses text page-by-page from either PPTX or PDF files."""
     filename = uploaded_file.name.lower()
     pages_data = []
 
@@ -254,11 +273,10 @@ def parse_file(uploaded_file):
     return pages_data
 
 # ----------------------------------------------------
-# Streamlit UI Interface
+# UI Layout
 # ----------------------------------------------------
 st.set_page_config(page_title="Cloud AI Slide & PDF Detector", layout="wide")
 
-# Header with Logout Button
 col_title, col_logout = st.columns([0.85, 0.15])
 with col_title:
     st.title("📊 Cloud AI Content Detector (PPTX & PDF)")
@@ -277,7 +295,7 @@ with tab1:
         if st.button("Check File", type="primary"):
             file_ext = uploaded_file.name.split(".")[-1].upper()
             
-            with st.spinner(f"Analyzing {file_ext} pages & querying Supabase DB..."):
+            with st.spinner(f"Analyzing sentences in {file_ext}..."):
                 pages = parse_file(uploaded_file)
                 
                 if not pages:
@@ -287,11 +305,19 @@ with tab1:
                     total_ai = 0.0
                     scannable_count = 0
                     analyzed = []
+                    doc_ai_sentences = 0
+                    doc_total_sentences = 0
 
                     for p in pages:
-                        score = analyze_text_ai_score(p["text"])
+                        score, highlighted_text, ai_sents, total_sents = analyze_document_text(p["text"])
                         p["ai_score"] = score
+                        p["highlighted_html"] = highlighted_text
+                        p["ai_sentences"] = ai_sents
+                        p["total_sentences"] = total_sents
                         p["duplicates"] = check_duplicate_in_db(p["text"])
+                        
+                        doc_ai_sentences += ai_sents
+                        doc_total_sentences += total_sents
                         analyzed.append(p)
 
                         if p["word_count"] >= 5:
@@ -300,36 +326,41 @@ with tab1:
 
                     overall_pct = round(total_ai / scannable_count, 1) if scannable_count > 0 else 0.0
 
-                    # Save to Cloud DB
                     save_to_database(uploaded_file.name, file_ext, total_pages, overall_pct, analyzed)
 
-                    # Display Summary Metrics
-                    c1, c2, c3 = st.columns(3)
+                    c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Overall AI Score", f"{overall_pct}%")
-                    c2.metric("Total Pages / Slides", total_pages)
-                    c3.metric("Scannable Pages", scannable_count)
+                    c2.metric("AI Sentences Flagged", f"{doc_ai_sentences} / {doc_total_sentences}")
+                    c3.metric("Total Pages / Slides", total_pages)
+                    c4.metric("Scannable Pages", scannable_count)
 
                     st.markdown("---")
-                    st.subheader("Page-by-Page Breakdown & Duplicate Report")
+                    st.subheader("Highlighted Sentence Breakdown")
 
                     for page in analyzed:
                         p_num = page["slide_num"]
                         score = page["ai_score"]
                         dups = page["duplicates"]
 
-                        # Status Badge
-                        if score >= 70:
-                            badge = "🔴 High AI"
-                        elif score >= 40:
-                            badge = "🟡 Moderate AI"
+                        if score >= 60:
+                            badge = "🔴 High AI Probability"
+                        elif score >= 35:
+                            badge = "🟡 Mixed / Moderate AI"
                         else:
                             badge = "🟢 Likely Human"
 
                         match_status = f" | ⚠️ Matched in DB ({len(dups)})" if dups else ""
 
-                        with st.expander(f"Page/Slide {p_num} — AI Rating: {score}% ({badge}){match_status}"):
-                            st.write(f"**Word Count:** {page['word_count']}")
-                            st.info(page["text"] if page["text"] else "*(Empty Page)*")
+                        with st.expander(f"Page/Slide {p_num} — AI Score: {score}% ({badge}){match_status}", expanded=True if score >= 40 else False):
+                            st.write(f"**Words:** {page['word_count']} | **AI Sentences:** {page['ai_sentences']} of {page['total_sentences']}")
+                            
+                            if page["highlighted_html"]:
+                                st.markdown(
+                                    f'<div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #dee2e6; line-height: 1.8;">{page["highlighted_html"]}</div>',
+                                    unsafe_allow_html=True
+                                )
+                            else:
+                                st.info("*(Empty Page)*")
 
                             if dups:
                                 st.warning("⚠️ Content Similarity Detected with Previously Saved Records:")
@@ -348,9 +379,18 @@ with tab2:
 
         if records:
             for r in records:
-                file_type = r[2] if r[2] else "PPTX"
-                formatted_time = str(r[5]).split('.')[0] if r[5] else ""
-                st.write(f"**File:** `{r[1]}` ({file_type}) | **Total Pages:** {r[3]} | **AI Score:** {r[4]}% | **Uploaded:** {formatted_time}")
+                rec_id, filename, file_type, total_slides, score, upload_time = r
+                formatted_time = str(upload_time).split('.')[0] if upload_time else ""
+                
+                col_info, col_del = st.columns([0.85, 0.15])
+                with col_info:
+                    st.write(f"**File:** `{filename}` ({file_type}) | **Total Pages:** {total_slides} | **AI Score:** {score}% | **Uploaded:** {formatted_time}")
+                with col_del:
+                    if st.button("🗑️ Delete", key=f"del_{rec_id}"):
+                        delete_from_database(rec_id)
+                        st.success(f"Deleted `{filename}`")
+                        st.rerun()
+                st.divider()
         else:
             st.info("No documents saved in cloud database yet.")
     except Exception as e:
