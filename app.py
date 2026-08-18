@@ -13,11 +13,15 @@ from difflib import SequenceMatcher
 DB_URI = st.secrets["DATABASE_URL"]
 
 def get_db_connection():
-    """Establishes connection to Supabase PostgreSQL securely."""
-    db_url = st.secrets["DATABASE_URL"]
-    if "?pgbouncer=true" in db_url:
-        db_url = db_url.replace("?pgbouncer=true", "")
-    return psycopg2.connect(db_url)
+    """Establishes connection to Supabase using separate secret keys."""
+    pg = st.secrets["postgres"]
+    return psycopg2.connect(
+        host=pg["host"],
+        port=pg["port"],
+        dbname=pg["dbname"],
+        user=pg["user"],
+        password=pg["password"]
+    )
 
 def init_db():
     """Creates database tables in Supabase if they don't exist yet."""
