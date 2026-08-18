@@ -5,6 +5,10 @@ import psycopg2
 import re
 import math
 from difflib import SequenceMatcher
+from datetime import datetime, timezone, timedelta
+
+# Define Malaysia Timezone (UTC+8)
+MYT = timezone(timedelta(hours=8))
 
 # ----------------------------------------------------
 # Database Connection (Supabase PostgreSQL)
@@ -31,7 +35,8 @@ def init_db():
             file_type TEXT,
             total_slides INTEGER,
             overall_ai_score REAL,
-            upload_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            overall_plagiarism_score REAL DEFAULT 0.0,
+            upload_time VARCHAR(50)
         );
     ''')
     c.execute('''
@@ -43,6 +48,12 @@ def init_db():
             ai_score REAL
         );
     ''')
+    # Ensure overall_plagiarism_score column exists for older schema
+    try:
+        c.execute("ALTER TABLE presentations ADD COLUMN IF NOT EXISTS overall_plagiarism_score REAL DEFAULT 0.0;")
+    except Exception:
+        pass
+
     conn.commit()
     c.close()
     conn.close()
@@ -83,23 +94,23 @@ def score_single_sentence(sentence: str) -> float:
     """Calculates AI probability for an individual sentence or line."""
     clean_s = sentence.strip()
     words = re.findall(r'\b[a-zA-Z]+\b', clean_s.lower())
-    if len(words) < 3:
+    if len(words) < 2:
         return 0.0
 
     score = 0.0
     text_lower = clean_s.lower()
 
-    # 1. Structural AI Q&A and Definition Patterns (Common in ChatGPT slides)
+    # 1. Structural AI Q&A and Definition Patterns
     qa_patterns = [
         r"^what is\b", r"^why is\b", r"^how can we\b", r"^can using\b", 
-        r"^why should we\b", r"^is copying\b", r"\bmeans using someone\b",
-        r"\bwithout giving them credit\b", r"\buse your own words\b",
+        r"^why should we\b", r"^is copying\b", r"\bmeans using\b",
+        r"\bwithout giving\b", r"\buse your own\b", r"\balways give credit\b",
         r"\bbe honest, be creative\b", r"\bbecause it is dishonest\b",
-        r"\bstops us from learning\b", r"\balways give credit\b"
+        r"\bstops us from learning\b", r"\bplagiarism\b", r"^qna\b", r"^sources\b"
     ]
     for pattern in qa_patterns:
         if re.search(pattern, text_lower):
-            score += 45.0
+            score += 50.0
 
     # 2. General AI Vocabulary & Transition Phrases
     ai_phrases = [
@@ -110,25 +121,24 @@ def score_single_sentence(sentence: str) -> float:
     ]
     for phrase in ai_phrases:
         if phrase in text_lower:
-            score += 40.0
+            score += 45.0
 
-    # 3. Sentence Length Uniformity & Pacing (ChatGPT preferred range)
+    # 3. Sentence Length Uniformity & Pacing
     word_count = len(words)
-    if 8 <= word_count <= 22:
+    if 6 <= word_count <= 25:
         score += 25.0
     
     # 4. Standard Definition / Rule Formatting
     if clean_s.startswith(("1.", "2.", "3.", "4.", "5.", "- ", "• ")):
-        score += 15.0
+        score += 20.0
 
-    return min(98.0, max(10.0 if score > 0 else 0.0, score))
+    return min(99.0, max(15.0 if score > 0 else 0.0, score))
 
 def analyze_document_text(text: str):
-    """Parses text line-by-line / sentence-by-sentence, highlighting AI content."""
-    if not text or len(text.strip()) < 10:
+    """Parses text sentence-by-sentence, highlighting AI content."""
+    if not text or len(text.strip()) < 5:
         return 0.0, "", 0, 0
 
-    # Split text into distinct sentences and lines
     raw_chunks = [c.strip() for c in re.split(r'(\n+|[.!?]+)', text) if c.strip()]
     
     reconstructed_chunks = []
@@ -154,7 +164,7 @@ def analyze_document_text(text: str):
     valid_chunks = 0
 
     for chunk in reconstructed_chunks:
-        if len(re.findall(r'\b[a-zA-Z]+\b', chunk)) < 3:
+        if len(re.findall(r'\b[a-zA-Z]+\b', chunk)) < 2:
             highlighted_html.append(chunk + " ")
             continue
 
@@ -162,8 +172,7 @@ def analyze_document_text(text: str):
         total_score += chunk_score
         valid_chunks += 1
 
-        # Flag as AI if sentence score is 45%+
-        if chunk_score >= 45.0:
+        if chunk_score >= 40.0:
             ai_sentence_count += 1
             highlighted_html.append(
                 f'<mark style="background-color: #ffe066; padding: 2px 5px; border-radius: 4px; font-weight: 500;" title="AI Score: {chunk_score}%">{chunk}</mark> '
@@ -171,18 +180,24 @@ def analyze_document_text(text: str):
         else:
             highlighted_html.append(f'{chunk} ')
 
-    overall_score = round(total_score / valid_chunks, 1) if valid_chunks > 0 else 0.0
+    avg_score = round(total_score / valid_chunks, 1) if valid_chunks > 0 else 0.0
     
-    # Calibration boost when multiple AI structural sentences are detected
-    if ai_sentence_count >= 3:
-        overall_score = max(overall_score, round((ai_sentence_count / valid_chunks) * 100, 1))
+    # Weighted Calibration for Document Score
+    if valid_chunks > 0:
+        ai_ratio_score = round((ai_sentence_count / valid_chunks) * 100, 1)
+        overall_score = max(avg_score, ai_ratio_score)
+    else:
+        overall_score = 0.0
 
-    return overall_score, "".join(highlighted_html), ai_sentence_count, valid_chunks
+    return round(overall_score, 1), "".join(highlighted_html), ai_sentence_count, valid_chunks
 
-
-def check_duplicate_in_db(slide_text: str, threshold=0.75):
-    if not slide_text.strip() or len(slide_text.split()) < 5:
-        return []
+# ----------------------------------------------------
+# Plagiarism / Duplicate Detection Engine
+# ----------------------------------------------------
+def check_duplicate_in_db(slide_text: str, threshold=0.50):
+    """Normalized text comparison for precise plagiarism matching."""
+    if not slide_text.strip() or len(slide_text.split()) < 3:
+        return [], 0.0
 
     conn = get_db_connection()
     c = conn.cursor()
@@ -196,24 +211,38 @@ def check_duplicate_in_db(slide_text: str, threshold=0.75):
     conn.close()
 
     matches = []
+    max_similarity = 0.0
+    
+    # Strip spaces and non-alphanumeric chars for exact content comparison
+    norm_current = re.sub(r'\W+', '', slide_text.lower())
+
     for filename, slide_num, stored_text in records:
-        ratio = SequenceMatcher(None, slide_text.lower(), stored_text.lower()).ratio()
+        norm_stored = re.sub(r'\W+', '', stored_text.lower())
+        
+        ratio = SequenceMatcher(None, norm_current, norm_stored).ratio()
         if ratio >= threshold:
+            sim_pct = round(ratio * 100, 1)
+            if sim_pct > max_similarity:
+                max_similarity = sim_pct
             matches.append({
                 "filename": filename,
                 "slide_number": slide_num,
-                "similarity_pct": round(ratio * 100, 1)
+                "similarity_pct": sim_pct
             })
-    return matches
+            
+    return matches, max_similarity
 
 
-def save_to_database(filename, file_type, total_slides, overall_score, slides_data):
+def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag, slides_data):
+    """Saves scan details with Malaysia Time (UTC+8)."""
+    current_myt_time = datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S")
+    
     conn = get_db_connection()
     c = conn.cursor()
     c.execute('''
-        INSERT INTO presentations (filename, file_type, total_slides, overall_ai_score)
-        VALUES (%s, %s, %s, %s) RETURNING id;
-    ''', (filename, file_type, total_slides, overall_score))
+        INSERT INTO presentations (filename, file_type, total_slides, overall_ai_score, overall_plagiarism_score, upload_time)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;
+    ''', (filename, file_type, total_slides, overall_ai, overall_plag, current_myt_time))
     
     pres_id = c.fetchone()[0]
 
@@ -229,7 +258,7 @@ def save_to_database(filename, file_type, total_slides, overall_score, slides_da
 
 
 def delete_from_database(presentation_id):
-    """Deletes a file record and its associated page details from database."""
+    """Deletes record from Supabase database."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("DELETE FROM presentations WHERE id = %s;", (presentation_id,))
@@ -279,7 +308,7 @@ st.set_page_config(page_title="Cloud AI Slide & PDF Detector", layout="wide")
 
 col_title, col_logout = st.columns([0.85, 0.15])
 with col_title:
-    st.title("📊 Cloud AI Content Detector (PPTX & PDF)")
+    st.title("📊 Cloud AI Content & Plagiarism Detector")
 with col_logout:
     st.write("")
     if st.button("Logout"):
@@ -295,7 +324,7 @@ with tab1:
         if st.button("Check File", type="primary"):
             file_ext = uploaded_file.name.split(".")[-1].upper()
             
-            with st.spinner(f"Analyzing sentences in {file_ext}..."):
+            with st.spinner(f"Analyzing content & plagiarism in {file_ext}..."):
                 pages = parse_file(uploaded_file)
                 
                 if not pages:
@@ -303,6 +332,7 @@ with tab1:
                 else:
                     total_pages = len(pages)
                     total_ai = 0.0
+                    total_plag = 0.0
                     scannable_count = 0
                     analyzed = []
                     doc_ai_sentences = 0
@@ -310,48 +340,49 @@ with tab1:
 
                     for p in pages:
                         score, highlighted_text, ai_sents, total_sents = analyze_document_text(p["text"])
+                        dups, page_max_plag = check_duplicate_in_db(p["text"])
+                        
                         p["ai_score"] = score
                         p["highlighted_html"] = highlighted_text
                         p["ai_sentences"] = ai_sents
                         p["total_sentences"] = total_sents
-                        p["duplicates"] = check_duplicate_in_db(p["text"])
+                        p["duplicates"] = dups
+                        p["plagiarism_score"] = page_max_plag
                         
                         doc_ai_sentences += ai_sents
                         doc_total_sentences += total_sents
                         analyzed.append(p)
 
-                        if p["word_count"] >= 5:
+                        if p["word_count"] >= 3:
                             total_ai += score
+                            total_plag += page_max_plag
                             scannable_count += 1
 
-                    overall_pct = round(total_ai / scannable_count, 1) if scannable_count > 0 else 0.0
+                    # Document Level Metrics
+                    overall_ai_pct = round(total_ai / scannable_count, 1) if scannable_count > 0 else 0.0
+                    overall_plag_pct = round(total_plag / scannable_count, 1) if scannable_count > 0 else 0.0
 
-                    save_to_database(uploaded_file.name, file_ext, total_pages, overall_pct, analyzed)
+                    save_to_database(uploaded_file.name, file_ext, total_pages, overall_ai_pct, overall_plag_pct, analyzed)
 
                     c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("Overall AI Score", f"{overall_pct}%")
-                    c2.metric("AI Sentences Flagged", f"{doc_ai_sentences} / {doc_total_sentences}")
-                    c3.metric("Total Pages / Slides", total_pages)
-                    c4.metric("Scannable Pages", scannable_count)
+                    c1.metric("Overall AI Score", f"{overall_ai_pct}%")
+                    c2.metric("Overall Plagiarism", f"{overall_plag_pct}%")
+                    c3.metric("AI Sentences Flagged", f"{doc_ai_sentences} / {doc_total_sentences}")
+                    c4.metric("Total Pages / Slides", total_pages)
 
                     st.markdown("---")
-                    st.subheader("Highlighted Sentence Breakdown")
+                    st.subheader("Highlighted Sentence Breakdown & Plagiarism Matches")
 
                     for page in analyzed:
                         p_num = page["slide_num"]
                         score = page["ai_score"]
+                        plag_score = page["plagiarism_score"]
                         dups = page["duplicates"]
 
-                        if score >= 60:
-                            badge = "🔴 High AI Probability"
-                        elif score >= 35:
-                            badge = "🟡 Mixed / Moderate AI"
-                        else:
-                            badge = "🟢 Likely Human"
+                        badge = "🔴 High AI" if score >= 50 else ("🟡 Moderate AI" if score >= 25 else "🟢 Likely Human")
+                        plag_badge = f" | ⚠️ Plagiarism Match: {plag_score}%" if plag_score > 0 else ""
 
-                        match_status = f" | ⚠️ Matched in DB ({len(dups)})" if dups else ""
-
-                        with st.expander(f"Page/Slide {p_num} — AI Score: {score}% ({badge}){match_status}", expanded=True if score >= 40 else False):
+                        with st.expander(f"Page/Slide {p_num} — AI Score: {score}% ({badge}){plag_badge}", expanded=True if (score >= 35 or plag_score >= 50) else False):
                             st.write(f"**Words:** {page['word_count']} | **AI Sentences:** {page['ai_sentences']} of {page['total_sentences']}")
                             
                             if page["highlighted_html"]:
@@ -363,28 +394,28 @@ with tab1:
                                 st.info("*(Empty Page)*")
 
                             if dups:
-                                st.warning("⚠️ Content Similarity Detected with Previously Saved Records:")
+                                st.warning("⚠️ Database Match Details:")
                                 for d in dups:
-                                    st.write(f"- **{d['similarity_pct']}% match** with file `{d['filename']}` (Page {d['slide_number']})")
+                                    st.write(f"- **{d['similarity_pct']}% match** with stored file `{d['filename']}` (Page {d['slide_number']})")
 
 with tab2:
     st.subheader("Cloud History (Supabase Database)")
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        c.execute("SELECT id, filename, file_type, total_slides, overall_ai_score, upload_time FROM presentations ORDER BY upload_time DESC")
+        c.execute("SELECT id, filename, file_type, total_slides, overall_ai_score, overall_plagiarism_score, upload_time FROM presentations ORDER BY id DESC")
         records = c.fetchall()
         c.close()
         conn.close()
 
         if records:
             for r in records:
-                rec_id, filename, file_type, total_slides, score, upload_time = r
-                formatted_time = str(upload_time).split('.')[0] if upload_time else ""
+                rec_id, filename, file_type, total_slides, ai_score, plag_score, upload_time = r
+                plag_val = plag_score if plag_score is not None else 0.0
                 
                 col_info, col_del = st.columns([0.85, 0.15])
                 with col_info:
-                    st.write(f"**File:** `{filename}` ({file_type}) | **Total Pages:** {total_slides} | **AI Score:** {score}% | **Uploaded:** {formatted_time}")
+                    st.write(f"**File:** `{filename}` ({file_type}) | **Pages:** {total_slides} | **AI Score:** {ai_score}% | **Plagiarism:** {plag_val}% | **Uploaded (MYT):** {upload_time}")
                 with col_del:
                     if st.button("🗑️ Delete", key=f"del_{rec_id}"):
                         delete_from_database(rec_id)
