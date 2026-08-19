@@ -432,8 +432,24 @@ with tab1:
                     doc_ai_sentences = 0
                     doc_total_sentences = 0
 
-                    for p in pages:
-                        score, highlighted_text, ai_sents, total_sents = analyze_document_text(p["text"])
+                    for i, p in enumerate(pages):
+                        # --- SKIP LOGIC ---
+                        # Skip if it is Page 1 (index 0) 
+                        # OR if it is one of the last two pages
+                        is_first_or_last = (i == 0) or (i >= total_pages - 2)
+                        
+                        if is_first_or_last:
+                            # Assign 0.0 AI and no highlighting
+                            score = 0.0
+                            highlighted_text = p["text"]
+                            ai_sents, total_sents = 0, 0
+                        else:
+                            # Run full AI detection
+                            score, highlighted_text, ai_sents, total_sents = analyze_document_text(p["text"])
+                            doc_ai_sentences += ai_sents
+                            doc_total_sentences += total_sents
+                        
+                        # --- Plagiarism check always runs ---
                         dups, page_max_plag = check_duplicate_in_db(p["text"])
                         
                         p["ai_score"] = score
@@ -443,16 +459,15 @@ with tab1:
                         p["duplicates"] = dups
                         p["plagiarism_score"] = page_max_plag
                         
-                        doc_ai_sentences += ai_sents
-                        doc_total_sentences += total_sents
                         analyzed.append(p)
 
-                        if p["word_count"] >= 3:
+                        # Only factor into "Overall" score if it's not a skipped page
+                        if p["word_count"] >= 3 and not is_first_or_last:
                             total_ai += score
                             total_plag += page_max_plag
                             scannable_count += 1
 
-                    # Document Level Metrics
+                    # Finalize Metrics
                     overall_ai_pct = round(total_ai / scannable_count, 1) if scannable_count > 0 else 0.0
                     overall_plag_pct = round(total_plag / scannable_count, 1) if scannable_count > 0 else 0.0
 
