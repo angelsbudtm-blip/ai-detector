@@ -49,6 +49,7 @@ def init_db():
             ai_score REAL
         );
     ''')
+    # Ensure overall_plagiarism_score column exists for older schema
     try:
         c.execute("ALTER TABLE presentations ADD COLUMN IF NOT EXISTS overall_plagiarism_score REAL DEFAULT 0.0;")
     except Exception:
@@ -91,6 +92,7 @@ if not check_password():
 # High-Precision Sentence & Document AI Detection Engine
 # ----------------------------------------------------
 def score_single_sentence(sentence: str) -> float:
+    """Calculates AI probability for an individual sentence or line."""
     clean_s = sentence.strip()
     words = re.findall(r'\b[a-zA-Z]+\b', clean_s.lower())
     if len(words) < 2:
@@ -99,6 +101,7 @@ def score_single_sentence(sentence: str) -> float:
     score = 0.0
     text_lower = clean_s.lower()
 
+    # 1. Structural AI Q&A and Definition Patterns
     qa_patterns = [
         r"^what is\b", r"^why is\b", r"^how can we\b", r"^can using\b", 
         r"^why should we\b", r"^is copying\b", r"\bmeans using\b",
@@ -110,6 +113,7 @@ def score_single_sentence(sentence: str) -> float:
         if re.search(pattern, text_lower):
             score += 50.0
 
+    # 2. General AI Vocabulary & Transition Phrases
     ai_phrases = [
         "in conclusion", "important to note", "crucial role", "key takeaways",
         "furthermore", "moreover", "in summary", "fast-paced", "delve into",
@@ -120,16 +124,19 @@ def score_single_sentence(sentence: str) -> float:
         if phrase in text_lower:
             score += 45.0
 
+    # 3. Sentence Length Uniformity & Pacing
     word_count = len(words)
     if 6 <= word_count <= 25:
         score += 25.0
     
+    # 4. Standard Definition / Rule Formatting
     if clean_s.startswith(("1.", "2.", "3.", "4.", "5.", "- ", "• ")):
         score += 20.0
 
     return min(99.0, max(15.0 if score > 0 else 0.0, score))
 
 def analyze_document_text(text: str):
+    """Parses text sentence-by-sentence, highlighting AI content."""
     if not text or len(text.strip()) < 5:
         return 0.0, "", 0, 0
 
@@ -176,6 +183,7 @@ def analyze_document_text(text: str):
 
     avg_score = round(total_score / valid_chunks, 1) if valid_chunks > 0 else 0.0
     
+    # Weighted Calibration for Document Score
     if valid_chunks > 0:
         ai_ratio_score = round((ai_sentence_count / valid_chunks) * 100, 1)
         overall_score = max(avg_score, ai_ratio_score)
@@ -188,6 +196,7 @@ def analyze_document_text(text: str):
 # Plagiarism / Duplicate Detection Engine
 # ----------------------------------------------------
 def check_duplicate_in_db(slide_text: str, threshold=0.50):
+    """Normalized text comparison for precise plagiarism matching."""
     if not slide_text.strip() or len(slide_text.split()) < 3:
         return [], 0.0
 
@@ -204,6 +213,8 @@ def check_duplicate_in_db(slide_text: str, threshold=0.50):
 
     matches = []
     max_similarity = 0.0
+    
+    # Strip spaces and non-alphanumeric chars for exact content comparison
     norm_current = re.sub(r'\W+', '', slide_text.lower())
 
     for filename, slide_num, stored_text in records:
@@ -223,10 +234,31 @@ def check_duplicate_in_db(slide_text: str, threshold=0.50):
     return matches, max_similarity
 
 # ----------------------------------------------------
-# PDF Report Generator
+# PDF Report Generator (With Inline AI Highlighting)
 # ----------------------------------------------------
+def sanitize_text_for_pdf(text):
+    """Converts smart quotes and unicode chars to FPDF-safe standard ascii."""
+    if not text: 
+        return ""
+    text = str(text)
+    # Replace common Microsoft Word / Mac smart punctuation
+    replacements = {
+        '\u2018': "'", '\u2019': "'",   # Smart single quotes
+        '\u201c': '"', '\u201d': '"',   # Smart double quotes
+        '\u2013': "-", '\u2014': "-",   # En and Em dashes
+        '\u2026': "...",                # Ellipsis
+        '\u00A0': " ",                  # Non-breaking space
+        '\u2022': "-"                   # Bullet points
+    }
+    for search_char, replace_char in replacements.items():
+        text = text.replace(search_char, replace_char)
+        
+    # Force convert anything else to latin-1 (replacing unknowns with '?')
+    return text.encode('latin-1', 'replace').decode('latin-1')
+
+
 def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, overall_plag, upload_time):
-    """Generates a downloadable PDF report including Student Name & Grade from Page 1."""
+    """Generates a PDF report, automatically detecting and coloring AI text RED."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT slide_number, extracted_text, ai_score FROM slide_records WHERE presentation_id = %s ORDER BY slide_number", (pres_id,))
@@ -238,6 +270,9 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
+    # Sanitize the filename just in case it has smart quotes!
+    safe_filename = sanitize_text_for_pdf(filename)
+
     # Document Header
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(0, 10, "AI Content & Plagiarism Analysis Report", ln=True, align='C')
@@ -245,7 +280,7 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
 
     # Document Stats
     pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 6, f"File Name: {filename} ({file_type})", ln=True)
+    pdf.cell(0, 6, f"File Name: {safe_filename} ({file_type})", ln=True)
     pdf.cell(0, 6, f"Upload Time (MYT): {upload_time}", ln=True)
     pdf.cell(0, 6, f"Overall AI Score: {overall_ai}%", ln=True)
     pdf.cell(0, 6, f"Overall Plagiarism: {overall_plag}%", ln=True)
@@ -255,7 +290,7 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
     # Extract Page 1 text for Student Name and Grade
     if slides:
         first_page_text = slides[0][1]
-        safe_text = first_page_text.encode('latin-1', 'replace').decode('latin-1')
+        safe_text = sanitize_text_for_pdf(first_page_text)
 
         pdf.set_font("Arial", 'B', 12)
         pdf.cell(0, 8, "Extracted Title Slide / Student Info (From Page 1):", ln=True)
@@ -265,27 +300,73 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
 
     # Breakdown Section
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "Page-by-Page Breakdown", ln=True)
+    pdf.cell(0, 10, "Page-by-Page Breakdown (AI Text Highlighted in Red)", ln=True)
     pdf.ln(2)
 
     for slide_num, text, s_ai in slides:
         pdf.set_font("Arial", 'B', 11)
+        pdf.set_text_color(0, 0, 0)
         badge = "High AI" if s_ai >= 50 else ("Moderate AI" if s_ai >= 25 else "Likely Human")
         pdf.cell(0, 6, f"Page {slide_num} | AI Score: {s_ai}% ({badge})", ln=True)
 
-        pdf.set_font("Arial", '', 10)
-        safe_slide_text = text.encode('latin-1', 'replace').decode('latin-1')
-        pdf.multi_cell(0, 5, safe_slide_text)
-        pdf.ln(4)
+        if not text or not text.strip():
+            pdf.set_font("Arial", 'I', 10)
+            pdf.cell(0, 5, "(Empty Page)", ln=True)
+            pdf.ln(4)
+            continue
 
-    # Return as standard string/bytes for Streamlit Download Button
+        # Re-run Sentence Parser for PDF formatting
+        raw_chunks = [c.strip() for c in re.split(r'(\n+|[.!?]+)', text) if c.strip()]
+        reconstructed_chunks = []
+        temp = ""
+        for chunk in raw_chunks:
+            if chunk in [".", "!", "?", "\n"]:
+                temp += chunk
+                reconstructed_chunks.append(temp.strip())
+                temp = ""
+            else:
+                if temp:
+                    reconstructed_chunks.append(temp.strip())
+                temp = chunk
+        if temp:
+            reconstructed_chunks.append(temp.strip())
+
+        if not reconstructed_chunks:
+            reconstructed_chunks = [text]
+
+        # Write text chunk by chunk with conditional red coloring
+        for chunk in reconstructed_chunks:
+            if len(re.findall(r'\b[a-zA-Z]+\b', chunk)) < 2:
+                pdf.set_font("Arial", '', 10)
+                pdf.set_text_color(0, 0, 0)
+                safe_chunk = sanitize_text_for_pdf(chunk) + " "
+                pdf.write(5, safe_chunk)
+                continue
+
+            chunk_score = score_single_sentence(chunk)
+            safe_chunk = sanitize_text_for_pdf(chunk) + " "
+
+            # If it passes the AI threshold, print in Bold Red
+            if chunk_score >= 40.0:
+                pdf.set_font("Arial", 'B', 10)
+                pdf.set_text_color(220, 20, 60) # Crimson Red
+            else:
+                pdf.set_font("Arial", '', 10)
+                pdf.set_text_color(0, 0, 0) # Black
+
+            pdf.write(5, safe_chunk)
+
+        pdf.ln(8) # Provide space between slides
+
+    # Reset colors and return bytes
+    pdf.set_text_color(0, 0, 0)
     return pdf.output(dest='S').encode('latin-1')
-
 
 # ----------------------------------------------------
 # Database Handlers
 # ----------------------------------------------------
 def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag, slides_data):
+    """Saves scan details with Malaysia Time (UTC+8)."""
     current_myt_time = datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S")
     
     conn = get_db_connection()
@@ -309,6 +390,7 @@ def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag
 
 
 def delete_from_database(presentation_id):
+    """Deletes record from Supabase database."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("DELETE FROM presentations WHERE id = %s;", (presentation_id,))
@@ -408,6 +490,7 @@ with tab1:
                             total_plag += page_max_plag
                             scannable_count += 1
 
+                    # Document Level Metrics
                     overall_ai_pct = round(total_ai / scannable_count, 1) if scannable_count > 0 else 0.0
                     overall_plag_pct = round(total_plag / scannable_count, 1) if scannable_count > 0 else 0.0
 
@@ -452,8 +535,8 @@ with tab2:
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        # Limiting to 50 to prevent PDF generator from slowing down loading heavily
-        c.execute("SELECT id, filename, file_type, total_slides, overall_ai_score, overall_plagiarism_score, upload_time FROM presentations ORDER BY id DESC LIMIT 50")
+        # Fetches the entire historical list without limitations
+        c.execute("SELECT id, filename, file_type, total_slides, overall_ai_score, overall_plagiarism_score, upload_time FROM presentations ORDER BY id DESC")
         records = c.fetchall()
         c.close()
         conn.close()
