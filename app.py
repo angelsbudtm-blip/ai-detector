@@ -258,7 +258,7 @@ def sanitize_text_for_pdf(text):
 
 
 def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, overall_plag, upload_time):
-    """Generates a PDF report, automatically detecting and coloring AI text RED."""
+    """Generates a PDF report with Yellow Background Highlighting for AI text."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("SELECT slide_number, extracted_text, ai_score FROM slide_records WHERE presentation_id = %s ORDER BY slide_number", (pres_id,))
@@ -270,96 +270,58 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    # Sanitize the filename just in case it has smart quotes!
-    safe_filename = sanitize_text_for_pdf(filename)
-
     # Document Header
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(0, 10, "AI Content & Plagiarism Analysis Report", ln=True, align='C')
     pdf.ln(5)
 
-    # Document Stats
     pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 6, f"File Name: {safe_filename} ({file_type})", ln=True)
-    pdf.cell(0, 6, f"Upload Time (MYT): {upload_time}", ln=True)
+    pdf.cell(0, 6, f"File Name: {sanitize_text_for_pdf(filename)}", ln=True)
+    pdf.cell(0, 6, f"Upload Time: {upload_time}", ln=True)
     pdf.cell(0, 6, f"Overall AI Score: {overall_ai}%", ln=True)
-    pdf.cell(0, 6, f"Overall Plagiarism: {overall_plag}%", ln=True)
-    pdf.cell(0, 6, f"Total Pages/Slides: {total_slides}", ln=True)
-    pdf.ln(5)
-
-    # Extract Page 1 text for Student Name and Grade
-    if slides:
-        first_page_text = slides[0][1]
-        safe_text = sanitize_text_for_pdf(first_page_text)
-
-        pdf.set_font("Arial", 'B', 12)
-        pdf.cell(0, 8, "Extracted Title Slide / Student Info (From Page 1):", ln=True)
-        pdf.set_font("Arial", '', 11)
-        pdf.multi_cell(0, 6, safe_text if safe_text.strip() else "No readable text found on Page 1.")
-        pdf.ln(5)
-
-    # Breakdown Section
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, "Page-by-Page Breakdown (AI Text Highlighted in Red)", ln=True)
-    pdf.ln(2)
+    pdf.ln(10)
 
     for slide_num, text, s_ai in slides:
         pdf.set_font("Arial", 'B', 11)
-        pdf.set_text_color(0, 0, 0)
-        badge = "High AI" if s_ai >= 50 else ("Moderate AI" if s_ai >= 25 else "Likely Human")
-        pdf.cell(0, 6, f"Page {slide_num} | AI Score: {s_ai}% ({badge})", ln=True)
+        pdf.cell(0, 8, f"Page {slide_num} | AI Score: {s_ai}%", ln=True)
 
         if not text or not text.strip():
-            pdf.set_font("Arial", 'I', 10)
-            pdf.cell(0, 5, "(Empty Page)", ln=True)
-            pdf.ln(4)
             continue
 
-        # Re-run Sentence Parser for PDF formatting
+        # Re-parse into sentences consistently
         raw_chunks = [c.strip() for c in re.split(r'(\n+|[.!?]+)', text) if c.strip()]
-        reconstructed_chunks = []
-        temp = ""
+        
+        # Write text chunk by chunk
+        pdf.set_font("Arial", '', 10)
         for chunk in raw_chunks:
+            # Skip separators
             if chunk in [".", "!", "?", "\n"]:
-                temp += chunk
-                reconstructed_chunks.append(temp.strip())
-                temp = ""
-            else:
-                if temp:
-                    reconstructed_chunks.append(temp.strip())
-                temp = chunk
-        if temp:
-            reconstructed_chunks.append(temp.strip())
-
-        if not reconstructed_chunks:
-            reconstructed_chunks = [text]
-
-        # Write text chunk by chunk with conditional red coloring
-        for chunk in reconstructed_chunks:
-            if len(re.findall(r'\b[a-zA-Z]+\b', chunk)) < 2:
-                pdf.set_font("Arial", '', 10)
-                pdf.set_text_color(0, 0, 0)
-                safe_chunk = sanitize_text_for_pdf(chunk) + " "
-                pdf.write(5, safe_chunk)
+                pdf.write(5, chunk + " ")
                 continue
-
+            
             chunk_score = score_single_sentence(chunk)
             safe_chunk = sanitize_text_for_pdf(chunk) + " "
-
-            # If it passes the AI threshold, print in Bold Red
-            if chunk_score >= 40.0:
-                pdf.set_font("Arial", 'B', 10)
-                pdf.set_text_color(220, 20, 60) # Crimson Red
+            
+            # If AI detected (>0), draw yellow background rect
+            if chunk_score > 0:
+                # Calculate text width to draw the highlight box
+                text_w = pdf.get_string_width(safe_chunk)
+                current_x = pdf.get_x()
+                current_y = pdf.get_y()
+                
+                # Draw yellow rect (RGB: 255, 255, 150)
+                pdf.set_fill_color(255, 255, 150)
+                pdf.rect(current_x, current_y, text_w + 1, 5, 'F')
+                
+                # Reset color for text
+                pdf.set_text_color(0, 0, 0)
+                pdf.write(5, safe_chunk)
             else:
-                pdf.set_font("Arial", '', 10)
-                pdf.set_text_color(0, 0, 0) # Black
+                pdf.set_text_color(0, 0, 0)
+                pdf.write(5, safe_chunk)
 
-            pdf.write(5, safe_chunk)
+        pdf.ln(8)
 
-        pdf.ln(8) # Provide space between slides
-
-    # Reset colors and return bytes
-    pdf.set_text_color(0, 0, 0)
     return pdf.output(dest='S').encode('latin-1')
 
 # ----------------------------------------------------
