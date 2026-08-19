@@ -243,19 +243,18 @@ def sanitize_text_for_pdf(text):
     text = str(text)
     # Replace common Microsoft Word / Mac smart punctuation
     replacements = {
-        '\u2018': "'", '\u2019': "'",   # Smart single quotes
-        '\u201c': '"', '\u201d': '"',   # Smart double quotes
-        '\u2013': "-", '\u2014': "-",   # En and Em dashes
-        '\u2026': "...",                # Ellipsis
-        '\u00A0': " ",                  # Non-breaking space
-        '\u2022': "-"                   # Bullet points
+        '\u2018': "'", '\u2019': "'",    # Smart single quotes
+        '\u201c': '"', '\u201d': '"',    # Smart double quotes
+        '\u2013': "-", '\u2014': "-",    # En and Em dashes
+        '\u2026': "...",                 # Ellipsis
+        '\u00A0': " ",                   # Non-breaking space
+        '\u2022': "-"                    # Bullet points
     }
     for search_char, replace_char in replacements.items():
         text = text.replace(search_char, replace_char)
         
     # Force convert anything else to latin-1 (replacing unknowns with '?')
     return text.encode('latin-1', 'replace').decode('latin-1')
-
 
 def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, overall_plag, upload_time):
     """Generates a PDF report with Yellow Background Highlighting for AI text."""
@@ -350,7 +349,6 @@ def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag
     c.close()
     conn.close()
 
-
 def delete_from_database(presentation_id):
     """Deletes record from Supabase database."""
     conn = get_db_connection()
@@ -359,7 +357,6 @@ def delete_from_database(presentation_id):
     conn.commit()
     c.close()
     conn.close()
-
 
 def parse_file(uploaded_file):
     filename = uploaded_file.name.lower()
