@@ -53,7 +53,6 @@ def init_db():
             total_sentences INTEGER DEFAULT 0
         );
     ''')
-    # Ensure columns exist for older schemas
     try:
         c.execute("ALTER TABLE presentations ADD COLUMN IF NOT EXISTS overall_plagiarism_score REAL DEFAULT 0.0;")
         c.execute("ALTER TABLE slide_records ADD COLUMN IF NOT EXISTS plagiarism_score REAL DEFAULT 0.0;")
@@ -73,12 +72,14 @@ except Exception as e:
     st.error(f"Database connection error: {e}")
 
 # ----------------------------------------------------
-# Security / Login Handler
+# Security / Login Handler (Optimized State)
 # ----------------------------------------------------
-def check_password():
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
+st.set_page_config(page_title="Cloud AI Slide & PDF Detector", layout="wide")
 
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+def check_password():
     if not st.session_state["authenticated"]:
         st.title("🔒 AI Slide Detector Login")
         user_input = st.text_input("Username")
@@ -109,7 +110,6 @@ def score_single_sentence(sentence: str) -> float:
     score = 0.0
     text_lower = clean_s.lower()
 
-    # 1. Structural AI Q&A and Definition Patterns
     qa_patterns = [
         r"^what is\b", r"^why is\b", r"^how can we\b", r"^can using\b", 
         r"^why should we\b", r"^is copying\b", r"\bmeans using\b",
@@ -121,7 +121,6 @@ def score_single_sentence(sentence: str) -> float:
         if re.search(pattern, text_lower):
             score += 50.0
 
-    # 2. General AI Vocabulary & Transition Phrases
     ai_phrases = [
         "in conclusion", "important to note", "crucial role", "key takeaways",
         "furthermore", "moreover", "in summary", "fast-paced", "delve into",
@@ -132,12 +131,10 @@ def score_single_sentence(sentence: str) -> float:
         if phrase in text_lower:
             score += 45.0
 
-    # 3. Sentence Length Uniformity & Pacing
     word_count = len(words)
     if 6 <= word_count <= 25:
         score += 25.0
     
-    # 4. Standard Definition / Rule Formatting
     if clean_s.startswith(("1.", "2.", "3.", "4.", "5.", "- ", "• ")):
         score += 20.0
 
@@ -191,7 +188,6 @@ def analyze_document_text(text: str):
 
     avg_score = round(total_score / valid_chunks, 1) if valid_chunks > 0 else 0.0
     
-    # Weighted Calibration for Document Score
     if valid_chunks > 0:
         ai_ratio_score = round((ai_sentence_count / valid_chunks) * 100, 1)
         overall_score = max(avg_score, ai_ratio_score)
@@ -201,30 +197,35 @@ def analyze_document_text(text: str):
     return round(overall_score, 1), "".join(highlighted_html), ai_sentence_count, valid_chunks
 
 # ----------------------------------------------------
-# Plagiarism / Duplicate Detection Engine
+# Optimized Plagiarism / Duplicate Detection Engine
 # ----------------------------------------------------
-def check_duplicate_in_db(slide_text: str, threshold=0.50):
-    """Normalized text comparison for precise plagiarism matching."""
+def fetch_all_stored_slides():
+    """Fetches all stored slide records ONCE to prevent looping database lag."""
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''
+            SELECT p.filename, s.slide_number, s.extracted_text 
+            FROM slide_records s
+            JOIN presentations p ON s.presentation_id = p.id
+        ''')
+        records = c.fetchall()
+        c.close()
+        conn.close()
+        return records
+    except Exception:
+        return []
+
+def check_duplicates_locally(slide_text: str, stored_records, threshold=0.50):
+    """Compares slide text against pre-fetched database records in memory instantly."""
     if not slide_text.strip() or len(slide_text.split()) < 3:
         return [], 0.0
 
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute('''
-        SELECT p.filename, s.slide_number, s.extracted_text 
-        FROM slide_records s
-        JOIN presentations p ON s.presentation_id = p.id
-    ''')
-    records = c.fetchall()
-    c.close()
-    conn.close()
-
     matches = []
     max_similarity = 0.0
-    
     norm_current = re.sub(r'\W+', '', slide_text.lower())
 
-    for filename, slide_num, stored_text in records:
+    for filename, slide_num, stored_text in stored_records:
         norm_stored = re.sub(r'\W+', '', stored_text.lower())
         
         ratio = SequenceMatcher(None, norm_current, norm_stored).ratio()
@@ -241,10 +242,9 @@ def check_duplicate_in_db(slide_text: str, threshold=0.50):
     return matches, max_similarity
 
 # ----------------------------------------------------
-# PDF Report Generator (Comprehensive Structured Report)
+# PDF Report Generator
 # ----------------------------------------------------
 def sanitize_text_for_pdf(text):
-    """Converts smart quotes and unicode chars to FPDF-safe standard ascii."""
     if not text: 
         return ""
     text = str(text)
@@ -261,7 +261,6 @@ def sanitize_text_for_pdf(text):
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, overall_plag, upload_time):
-    """Generates a professional PDF report matching the UI analytics structure."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("""
@@ -274,11 +273,12 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
     c.close()
     conn.close()
 
+    stored_records = fetch_all_stored_slides()
+
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
 
-    # Document Header
     pdf.set_font("Arial", 'B', 15)
     pdf.cell(0, 10, "Cloud AI Content & Plagiarism Analysis Report", ln=True, align='C')
     pdf.ln(3)
@@ -297,7 +297,6 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
     for slide_num, text, s_ai, s_plag, w_count, ai_sents, tot_sents in slides:
         plag_val = s_plag if s_plag is not None else 0.0
         
-        # Slide Header block
         pdf.set_font("Arial", 'B', 10)
         pdf.set_fill_color(240, 240, 240)
         pdf.cell(0, 7, f" Page/Slide {slide_num}  |  AI Score: {s_ai}%  |  Plagiarism Match: {plag_val}%", ln=True, fill=True)
@@ -311,7 +310,6 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
             pdf.ln(4)
             continue
 
-        # Text Content with Highlighting
         raw_chunks = [c.strip() for c in re.split(r'(\n+|[.!?]+)', text) if c.strip()]
         pdf.set_font("Arial", '', 9)
         
@@ -337,8 +335,7 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
 
         pdf.ln(6)
 
-        # Database Match Details if plagiarism found
-        dups, _ = check_duplicate_in_db(text)
+        dups, _ = check_duplicates_locally(text, stored_records)
         if dups:
             pdf.set_font("Arial", 'B', 8)
             pdf.set_text_color(180, 0, 0)
@@ -357,7 +354,6 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
 # Database Handlers
 # ----------------------------------------------------
 def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag, slides_data):
-    """Saves scan details and individual slide metrics with Malaysia Time (UTC+8)."""
     current_myt_time = datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S")
     
     conn = get_db_connection()
@@ -380,7 +376,6 @@ def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag
     conn.close()
 
 def delete_from_database(presentation_id):
-    """Deletes record from Supabase database."""
     conn = get_db_connection()
     c = conn.cursor()
     c.execute("DELETE FROM presentations WHERE id = %s;", (presentation_id,))
@@ -425,8 +420,6 @@ def parse_file(uploaded_file):
 # ----------------------------------------------------
 # UI Layout
 # ----------------------------------------------------
-st.set_page_config(page_title="Cloud AI Slide & PDF Detector", layout="wide")
-
 col_title, col_logout = st.columns([0.85, 0.15])
 with col_title:
     st.title("📊 Cloud AI Content & Plagiarism Detector")
@@ -451,6 +444,9 @@ with tab1:
                 if not pages:
                     st.warning("No readable text found in document.")
                 else:
+                    # Fetch all stored records ONCE before looping through pages for fast comparisons
+                    stored_records = fetch_all_stored_slides()
+
                     total_pages = len(pages)
                     total_ai = 0.0
                     total_plag = 0.0
@@ -460,7 +456,6 @@ with tab1:
                     doc_total_sentences = 0
 
                     for i, p in enumerate(pages):
-                        # --- SKIP LOGIC ---
                         is_first_or_last = (i == 0) or (i >= total_pages - 2)
                         
                         if is_first_or_last:
@@ -472,8 +467,7 @@ with tab1:
                             doc_ai_sentences += ai_sents
                             doc_total_sentences += total_sents
                         
-                        # --- Plagiarism check ---
-                        dups, page_max_plag = check_duplicate_in_db(p["text"])
+                        dups, page_max_plag = check_duplicates_locally(p["text"], stored_records)
                         
                         p["ai_score"] = score
                         p["highlighted_html"] = highlighted_text
@@ -489,7 +483,6 @@ with tab1:
                             total_plag += page_max_plag
                             scannable_count += 1
 
-                    # Finalize Metrics
                     overall_ai_pct = round(total_ai / scannable_count, 1) if scannable_count > 0 else 0.0
                     overall_plag_pct = round(total_plag / scannable_count, 1) if scannable_count > 0 else 0.0
 
@@ -530,6 +523,7 @@ with tab1:
                                     st.write(f"- **{d['similarity_pct']}% match** with stored file `{d['filename']}` (Page {d['slide_number']})")
 
 with tab2:
+    st.markdown('<div id="cloud-history-supabase-database"></div>', unsafe_allow_html=True)
     st.subheader("Cloud History (Supabase Database)")
     try:
         conn = get_db_connection()
