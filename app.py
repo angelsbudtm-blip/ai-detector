@@ -46,12 +46,20 @@ def init_db():
             presentation_id INTEGER REFERENCES presentations(id) ON DELETE CASCADE,
             slide_number INTEGER,
             extracted_text TEXT,
-            ai_score REAL
+            ai_score REAL,
+            plagiarism_score REAL DEFAULT 0.0,
+            word_count INTEGER DEFAULT 0,
+            ai_sentences INTEGER DEFAULT 0,
+            total_sentences INTEGER DEFAULT 0
         );
     ''')
-    # Ensure overall_plagiarism_score column exists for older schema
+    # Ensure columns exist for older schemas
     try:
         c.execute("ALTER TABLE presentations ADD COLUMN IF NOT EXISTS overall_plagiarism_score REAL DEFAULT 0.0;")
+        c.execute("ALTER TABLE slide_records ADD COLUMN IF NOT EXISTS plagiarism_score REAL DEFAULT 0.0;")
+        c.execute("ALTER TABLE slide_records ADD COLUMN IF NOT EXISTS word_count INTEGER DEFAULT 0;")
+        c.execute("ALTER TABLE slide_records ADD COLUMN IF NOT EXISTS ai_sentences INTEGER DEFAULT 0;")
+        c.execute("ALTER TABLE slide_records ADD COLUMN IF NOT EXISTS total_sentences INTEGER DEFAULT 0;")
     except Exception:
         pass
 
@@ -214,7 +222,6 @@ def check_duplicate_in_db(slide_text: str, threshold=0.50):
     matches = []
     max_similarity = 0.0
     
-    # Strip spaces and non-alphanumeric chars for exact content comparison
     norm_current = re.sub(r'\W+', '', slide_text.lower())
 
     for filename, slide_num, stored_text in records:
@@ -234,33 +241,35 @@ def check_duplicate_in_db(slide_text: str, threshold=0.50):
     return matches, max_similarity
 
 # ----------------------------------------------------
-# PDF Report Generator (With Inline AI Highlighting)
+# PDF Report Generator (Comprehensive Structured Report)
 # ----------------------------------------------------
 def sanitize_text_for_pdf(text):
     """Converts smart quotes and unicode chars to FPDF-safe standard ascii."""
     if not text: 
         return ""
     text = str(text)
-    # Replace common Microsoft Word / Mac smart punctuation
     replacements = {
-        '\u2018': "'", '\u2019': "'",    # Smart single quotes
-        '\u201c': '"', '\u201d': '"',    # Smart double quotes
-        '\u2013': "-", '\u2014': "-",    # En and Em dashes
-        '\u2026': "...",                 # Ellipsis
-        '\u00A0': " ",                   # Non-breaking space
-        '\u2022': "-"                    # Bullet points
+        '\u2018': "'", '\u2019': "'",
+        '\u201c': '"', '\u201d': '"',
+        '\u2013': "-", '\u2014': "-",
+        '\u2026': "...",
+        '\u00A0': " ",
+        '\u2022': "-"
     }
     for search_char, replace_char in replacements.items():
         text = text.replace(search_char, replace_char)
-        
-    # Force convert anything else to latin-1 (replacing unknowns with '?')
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, overall_plag, upload_time):
-    """Generates a PDF report with Yellow Background Highlighting for AI text."""
+    """Generates a professional PDF report matching the UI analytics structure."""
     conn = get_db_connection()
     c = conn.cursor()
-    c.execute("SELECT slide_number, extracted_text, ai_score FROM slide_records WHERE presentation_id = %s ORDER BY slide_number", (pres_id,))
+    c.execute("""
+        SELECT slide_number, extracted_text, ai_score, plagiarism_score, word_count, ai_sentences, total_sentences 
+        FROM slide_records 
+        WHERE presentation_id = %s 
+        ORDER BY slide_number
+    """, (pres_id,))
     slides = c.fetchall()
     c.close()
     conn.close()
@@ -270,56 +279,77 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
     pdf.set_auto_page_break(auto=True, margin=15)
 
     # Document Header
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "AI Content & Plagiarism Analysis Report", ln=True, align='C')
-    pdf.ln(5)
+    pdf.set_font("Arial", 'B', 15)
+    pdf.cell(0, 10, "Cloud AI Content & Plagiarism Analysis Report", ln=True, align='C')
+    pdf.ln(3)
 
-    pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 6, f"File Name: {sanitize_text_for_pdf(filename)}", ln=True)
-    pdf.cell(0, 6, f"Upload Time: {upload_time}", ln=True)
-    pdf.cell(0, 6, f"Overall AI Score: {overall_ai}%", ln=True)
-    pdf.ln(10)
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(0, 5, f"File Name: {sanitize_text_for_pdf(filename)} ({file_type})", ln=True)
+    pdf.cell(0, 5, f"Upload Time (MYT): {upload_time}", ln=True)
+    pdf.cell(0, 5, f"Total Pages / Slides: {total_slides}", ln=True)
+    pdf.cell(0, 5, f"Overall AI Score: {overall_ai}% | Overall Plagiarism Score: {overall_plag}%", ln=True)
+    pdf.ln(8)
 
-    for slide_num, text, s_ai in slides:
-        pdf.set_font("Arial", 'B', 11)
-        pdf.cell(0, 8, f"Page {slide_num} | AI Score: {s_ai}%", ln=True)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 8, "Detailed Page Breakdown & Database Matches:", ln=True)
+    pdf.ln(3)
+
+    for slide_num, text, s_ai, s_plag, w_count, ai_sents, tot_sents in slides:
+        plag_val = s_plag if s_plag is not None else 0.0
+        
+        # Slide Header block
+        pdf.set_font("Arial", 'B', 10)
+        pdf.set_fill_color(240, 240, 240)
+        pdf.cell(0, 7, f" Page/Slide {slide_num}  |  AI Score: {s_ai}%  |  Plagiarism Match: {plag_val}%", ln=True, fill=True)
+        
+        pdf.set_font("Arial", 'I', 9)
+        pdf.cell(0, 5, f"Words: {w_count}  |  AI Sentences Flagged: {ai_sents} of {tot_sents}", ln=True)
 
         if not text or not text.strip():
+            pdf.set_font("Arial", 'I', 9)
+            pdf.cell(0, 6, "(Empty Page / Slide)", ln=True)
+            pdf.ln(4)
             continue
 
-        # Re-parse into sentences consistently
+        # Text Content with Highlighting
         raw_chunks = [c.strip() for c in re.split(r'(\n+|[.!?]+)', text) if c.strip()]
+        pdf.set_font("Arial", '', 9)
         
-        # Write text chunk by chunk
-        pdf.set_font("Arial", '', 10)
         for chunk in raw_chunks:
-            # Skip separators
             if chunk in [".", "!", "?", "\n"]:
-                pdf.write(5, chunk + " ")
+                pdf.write(4, chunk + " ")
                 continue
             
             chunk_score = score_single_sentence(chunk)
             safe_chunk = sanitize_text_for_pdf(chunk) + " "
             
-            # If AI detected (>0), draw yellow background rect
             if chunk_score > 0:
-                # Calculate text width to draw the highlight box
                 text_w = pdf.get_string_width(safe_chunk)
                 current_x = pdf.get_x()
                 current_y = pdf.get_y()
-                
-                # Draw yellow rect (RGB: 255, 255, 150)
                 pdf.set_fill_color(255, 255, 150)
-                pdf.rect(current_x, current_y, text_w + 1, 5, 'F')
-                
-                # Reset color for text
+                pdf.rect(current_x, current_y, text_w + 1, 4, 'F')
                 pdf.set_text_color(0, 0, 0)
-                pdf.write(5, safe_chunk)
+                pdf.write(4, safe_chunk)
             else:
                 pdf.set_text_color(0, 0, 0)
-                pdf.write(5, safe_chunk)
+                pdf.write(4, safe_chunk)
 
-        pdf.ln(8)
+        pdf.ln(6)
+
+        # Database Match Details if plagiarism found
+        dups, _ = check_duplicate_in_db(text)
+        if dups:
+            pdf.set_font("Arial", 'B', 8)
+            pdf.set_text_color(180, 0, 0)
+            pdf.cell(0, 5, "Database Match Details:", ln=True)
+            pdf.set_font("Arial", '', 8)
+            for d in dups:
+                match_line = f"  - {d['similarity_pct']}% match with stored file '{d['filename']}' (Page {d['slide_number']})"
+                pdf.cell(0, 4, sanitize_text_for_pdf(match_line), ln=True)
+            pdf.set_text_color(0, 0, 0)
+
+        pdf.ln(5)
 
     return pdf.output(dest='S').encode('latin-1')
 
@@ -327,7 +357,7 @@ def generate_pdf_report(pres_id, filename, file_type, total_slides, overall_ai, 
 # Database Handlers
 # ----------------------------------------------------
 def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag, slides_data):
-    """Saves scan details with Malaysia Time (UTC+8)."""
+    """Saves scan details and individual slide metrics with Malaysia Time (UTC+8)."""
     current_myt_time = datetime.now(MYT).strftime("%Y-%m-%d %H:%M:%S")
     
     conn = get_db_connection()
@@ -341,9 +371,9 @@ def save_to_database(filename, file_type, total_slides, overall_ai, overall_plag
 
     for s in slides_data:
         c.execute('''
-            INSERT INTO slide_records (presentation_id, slide_number, extracted_text, ai_score)
-            VALUES (%s, %s, %s, %s);
-        ''', (pres_id, s["slide_num"], s["text"], s["ai_score"]))
+            INSERT INTO slide_records (presentation_id, slide_number, extracted_text, ai_score, plagiarism_score, word_count, ai_sentences, total_sentences)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+        ''', (pres_id, s["slide_num"], s["text"], s["ai_score"], s["plagiarism_score"], s["word_count"], s["ai_sentences"], s["total_sentences"]))
     
     conn.commit()
     c.close()
@@ -431,22 +461,18 @@ with tab1:
 
                     for i, p in enumerate(pages):
                         # --- SKIP LOGIC ---
-                        # Skip if it is Page 1 (index 0) 
-                        # OR if it is one of the last two pages
                         is_first_or_last = (i == 0) or (i >= total_pages - 2)
                         
                         if is_first_or_last:
-                            # Assign 0.0 AI and no highlighting
                             score = 0.0
                             highlighted_text = p["text"]
                             ai_sents, total_sents = 0, 0
                         else:
-                            # Run full AI detection
                             score, highlighted_text, ai_sents, total_sents = analyze_document_text(p["text"])
                             doc_ai_sentences += ai_sents
                             doc_total_sentences += total_sents
                         
-                        # --- Plagiarism check always runs ---
+                        # --- Plagiarism check ---
                         dups, page_max_plag = check_duplicate_in_db(p["text"])
                         
                         p["ai_score"] = score
@@ -458,7 +484,6 @@ with tab1:
                         
                         analyzed.append(p)
 
-                        # Only factor into "Overall" score if it's not a skipped page
                         if p["word_count"] >= 3 and not is_first_or_last:
                             total_ai += score
                             total_plag += page_max_plag
@@ -509,7 +534,6 @@ with tab2:
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        # Fetches the entire historical list without limitations
         c.execute("SELECT id, filename, file_type, total_slides, overall_ai_score, overall_plagiarism_score, upload_time FROM presentations ORDER BY id DESC")
         records = c.fetchall()
         c.close()
@@ -526,7 +550,6 @@ with tab2:
                     st.write(f"**File:** `{filename}` ({file_type}) | **Pages:** {total_slides} | **AI:** {ai_score}% | **Plag:** {plag_val}% | **Time:** {upload_time}")
                 
                 with col_pdf:
-                    # Generate the PDF data bytes on the fly for the download button
                     pdf_bytes = generate_pdf_report(rec_id, filename, file_type, total_slides, ai_score, plag_val, upload_time)
                     st.download_button(
                         label="📄 Generate Report",
